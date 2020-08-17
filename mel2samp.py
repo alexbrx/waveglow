@@ -24,20 +24,31 @@
 #  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 # *****************************************************************************\
-import os
+
 import random
 import argparse
 import json
 import torch
 import torch.utils.data
+import os
 import sys
-from scipy.io.wavfile import read
+import pickle
+import numpy as np
+import librosa
+from scipy import signal
+from librosa.filters import mel
+from numpy.random import RandomState
+from pysptk import sptk
 
-# We're using the audio processing from TacoTron2 to make sure it matches
-sys.path.insert(0, 'tacotron2')
-from tacotron2.layers import TacotronSTFT
+sys.path.insert(0, '/vol/bitbucket/apg416/SpeechSplit')
+from utils import butter_highpass
+from utils import speaker_normalization
+from utils import pySTFT
 
-MAX_WAV_VALUE = 32768.0
+
+mel_basis = mel(16000, 1024, fmin=90, fmax=7600, n_mels=80).T
+min_level = np.exp(-100 / 20 * np.log(10))
+b, a = butter_highpass(30, 16000, order=5)
 
 def files_to_list(filename):
     """
@@ -53,8 +64,13 @@ def load_wav_to_torch(full_path):
     """
     Loads wavdata into torch array
     """
-    sampling_rate, data = read(full_path)
-    return torch.from_numpy(data).float(), sampling_rate
+    x, sampling_rate = librosa.load(full_path, sr=16000)
+    if x.shape[0] % 256 == 0:
+        x = np.concatenate((x, np.array([1e-06])), axis=0)
+    y = signal.filtfilt(b, a, x)
+    wav = y * 0.96 + (np.random.rand(y.shape[0])-0.5)*1e-06
+    audio = torch.from_numpy(wav).float()
+    return audio, sampling_rate
 
 
 class Mel2Samp(torch.utils.data.Dataset):
@@ -67,26 +83,22 @@ class Mel2Samp(torch.utils.data.Dataset):
         self.audio_files = files_to_list(training_files)
         random.seed(1234)
         random.shuffle(self.audio_files)
-        self.stft = TacotronSTFT(filter_length=filter_length,
-                                 hop_length=hop_length,
-                                 win_length=win_length,
-                                 sampling_rate=sampling_rate,
-                                 mel_fmin=mel_fmin, mel_fmax=mel_fmax)
         self.segment_length = segment_length
         self.sampling_rate = sampling_rate
 
     def get_mel(self, audio):
-        audio_norm = audio / MAX_WAV_VALUE
-        audio_norm = audio_norm.unsqueeze(0)
-        audio_norm = torch.autograd.Variable(audio_norm, requires_grad=False)
-        melspec = self.stft.mel_spectrogram(audio_norm)
-        melspec = torch.squeeze(melspec, 0)
+        D = pySTFT(audio.numpy()).T
+        D_mel = np.dot(D, mel_basis)
+        D_db = 20 * np.log10(np.maximum(min_level, D_mel)) - 16
+        S = (D_db + 100) / 100
+        melspec = torch.from_numpy(S.T).float()
         return melspec
 
     def __getitem__(self, index):
         # Read audio
         filename = self.audio_files[index]
         audio, sampling_rate = load_wav_to_torch(filename)
+
         if sampling_rate != self.sampling_rate:
             raise ValueError("{} SR doesn't match target {} SR".format(
                 sampling_rate, self.sampling_rate))
@@ -100,8 +112,6 @@ class Mel2Samp(torch.utils.data.Dataset):
             audio = torch.nn.functional.pad(audio, (0, self.segment_length - audio.size(0)), 'constant').data
 
         mel = self.get_mel(audio)
-        audio = audio / MAX_WAV_VALUE
-
         return (mel, audio)
 
     def __len__(self):
