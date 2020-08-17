@@ -71,7 +71,7 @@ def train(num_gpus, rank, group_name, output_directory, epochs, learning_rate,
 
     criterion = WaveGlowLoss(sigma)
     model = WaveGlow(**waveglow_config).cuda()
-
+    
     #=====START: ADDED FOR DISTRIBUTED======
     if num_gpus > 1:
         model = apply_gradient_allreduce(model)
@@ -140,7 +140,7 @@ def train(num_gpus, rank, group_name, output_directory, epochs, learning_rate,
 
             print("{}:\t{:.9f}".format(iteration, reduced_loss))
             if with_tensorboard and rank == 0:
-                logger.add_scalar('training_loss', reduced_loss, i + len(train_loader) * epoch)
+                logger.add_scalar('training_loss', reduced_loss, iteration)
 
             if (iteration % iters_per_checkpoint == 0):
                 if rank == 0:
